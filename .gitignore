@@ -1,0 +1,66 @@
+# =======================================================================
+#               LINKEDIN SCRAPER - CUSTOM .GITIGNORE
+# =======================================================================
+
+# =============== CRITICAL: SESSIONS & CREDENTIALS ===============
+# LinkedIn login sessions, cookies, aur private tokens (Do not push!)
+linkedinsession
+linkedinsession/
+linkedinsession*
+session.json
+cookies.json
+.env
+.env*
+config.json
+credentials.json
+secrets/
+# Naye sessions aur debug files
+linkedin_session/
+linkedin_sessions/
+user_data/
+.linkedin_debug/
+debug_*.png
+debug_*.txt
+# =============== DATA & SCRAPER OUTPUTS ===============
+# Apne maange hue folders aur baaki temporary data storage
+data/
+filtered data/
+"filtered data/"
+filtered_data/
+output/
+outputs/
+logs/
+*.log
+*.csv
+*.xlsx
+*.json
+*.html
+
+# =============== PYTHON DEPENDENCIES & VIRTUAL ENVS ===============
+# Python environments aur cache (Agar Selenium/Playwright use ho raha ho)
+venv/
+.venv/
+env/
+ENV/
+pyvenv.cfg
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# =============== NODE / JAVASCRIPT DEPENDENCIES ===============
+# Node modules aur npm/yarn ke logs (Agar Puppeteer use ho raha ho)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# =============== SYSTEM & IDE SETTINGS ===============
+# Editor settings aur OS ke temporary files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
