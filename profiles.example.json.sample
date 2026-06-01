@@ -1,0 +1,14 @@
+{
+  "profiles": [
+    {
+      "name": "primary",
+      "user_data_dir": "linkedin_session",
+      "proxy_url": null
+    },
+    {
+      "name": "secondary",
+      "user_data_dir": "linkedin_session_2",
+      "proxy_url": "http://user:pass@host:port"
+    }
+  ]
+}

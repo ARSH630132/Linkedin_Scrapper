@@ -3,22 +3,28 @@ import time
 from typing import Optional
 
 import asyncio
+import argparse
 import csv
 import json
 import os
 import random
 import re
-import sys
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import unquote, urlparse, urlunparse
 
+import requests
 from playwright.async_api import (
     Error as PlaywrightError,
 )
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from playwright.async_api import async_playwright
+from dotenv import load_dotenv
 from pydantic import BaseModel, Field, ValidationError
+
+load_dotenv()
 
 
 # =========================
@@ -64,10 +70,34 @@ class ProfileData(BaseModel):
 @dataclass
 class ScrapeConfig:
     profile_url: str
-    provider: Literal["gemini", "openai"] = "gemini"
-    model: str = "gemini-2.5-flash"
     user_data_dir: str = "linkedin_session"
     headless: bool = True
+    proxy_url: str | None = None
+
+
+@dataclass
+class BrowserProfileConfig:
+    name: str
+    user_data_dir: str
+    proxy_url: str | None = None
+
+
+INACCESSIBLE_ERROR_MARKERS = (
+    "ERR_TUNNEL_CONNECTION_FAILED",
+    "ERR_SSL_PROTOCOL_ERROR",
+    "ERR_PROXY_CONNECTION_FAILED",
+    "ERR_SOCKS_CONNECTION_FAILED",
+    "ERR_CONNECTION_CLOSED",
+    "ERR_CONNECTION_RESET",
+    "ERR_TIMED_OUT",
+    "LinkedIn blocked/redirected the session",
+)
+
+GEMINI_MODEL = "gemini-2.5-flash-lite"
+OPENROUTER_MODEL = "google/gemini-2.5-flash-lite"
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+PROXY_POOL_PATH = "proxies.txt"
+PROXY_POOL_URL = "https://raw.githubusercontent.com/iplocate/free-proxy-list/main/countries/US/proxies.txt"
 
 
 SYSTEM_PROMPT = """
@@ -122,9 +152,6 @@ Return exactly this schema:
 # =========================
 
 class LLMProvider(BaseModel):
-    provider: Literal["gemini", "openai"]
-    model: str
-
     def get_completion(self, prompt: str, system_prompt: str) -> str:
         raise NotImplementedError
 
@@ -143,15 +170,11 @@ def _extract_retry_delay_seconds(error_text: str) -> float | None:
 
 
 class GeminiProvider(LLMProvider):
-    provider: Literal["gemini"] = "gemini"
-    model: str = Field(default="gemini-2.5-flash")
-
     def get_completion(self, prompt: str, system_prompt: str) -> str:
         from google import genai
 
         google_api_key = os.environ.get("GOOGLE_API_KEY")
         gemini_api_key = os.environ.get("GEMINI_API_KEY")
-        openai_api_key = os.environ.get("OPENAI_API_KEY")
 
         api_key = google_api_key or gemini_api_key
         if not api_key:
@@ -165,62 +188,44 @@ class GeminiProvider(LLMProvider):
         client = genai.Client(api_key=api_key)
         combined_prompt = f"{system_prompt}\n\n{prompt}"
 
-        model_candidates = [self.model]
-        for m in ("gemini-2.0-flash-lite", "gemini-1.5-flash"):
-            if m not in model_candidates:
-                model_candidates.append(m)
-
-        last_err: Exception | None = None
-
-        for model_name in model_candidates:
-            for attempt in range(3):
-                try:
-                    response = client.models.generate_content(
-                        model=model_name,
-                        contents=combined_prompt,
-                        config={"response_mime_type": "application/json"},
-                    )
-                    text = getattr(response, "text", None)
-                    if text and text.strip():
-                        return text.strip()
-                    raise RuntimeError("Gemini returned empty response.")
-                except Exception as e:
-                    last_err = e
-                    msg = str(e)
-                    is_quota = (
-                        "429" in msg
-                        or "resource_exhausted" in msg.lower()
-                        or "quota" in msg.lower()
-                    )
-                    if is_quota and attempt < 2:
-                        wait_s = _extract_retry_delay_seconds(msg) or min(8 * (2 ** attempt), 60)
-                        print(f"[Gemini] quota/rate hit, retrying in {wait_s:.1f}s (attempt {attempt+1}/3)...")
-                        time.sleep(wait_s + 0.5)
-                        continue
-                    break
-
-        if openai_api_key:
-            print("[Gemini] quota exhausted across fallback models. Switching to OpenAI fallback...")
-            return OpenAIProvider(model="gpt-4o-mini").get_completion(prompt=prompt, system_prompt=system_prompt)
-
-        print("[Gemini] quota exhausted and no OpenAI key. Returning empty profile JSON.")
-        return json.dumps(ProfileData().model_dump(), ensure_ascii=False)
+        for attempt in range(3):
+            try:
+                response = client.models.generate_content(
+                    model=GEMINI_MODEL,
+                    contents=combined_prompt,
+                    config={"response_mime_type": "application/json"},
+                )
+                text = getattr(response, "text", None)
+                if text and text.strip():
+                    return text.strip()
+                raise RuntimeError("Gemini returned empty response.")
+            except Exception as e:
+                msg = str(e)
+                is_quota = (
+                    "429" in msg
+                    or "resource_exhausted" in msg.lower()
+                    or "quota" in msg.lower()
+                )
+                if is_quota and attempt < 2:
+                    wait_s = _extract_retry_delay_seconds(msg) or min(8 * (2 ** attempt), 60)
+                    print(f"[Gemini] quota/rate hit, retrying in {wait_s:.1f}s (attempt {attempt+1}/3)...")
+                    time.sleep(wait_s + 0.5)
+                    continue
+                raise
 
 
-class OpenAIProvider(LLMProvider):
-    provider: Literal["openai"] = "openai"
-    model: str = Field(default="gpt-4o-mini")
+class OpenRouterProvider(LLMProvider):
 
     def get_completion(self, prompt: str, system_prompt: str) -> str:
         from openai import OpenAI
 
-        api_key = os.environ.get("OPENAI_API_KEY")
+        api_key = os.environ.get("OPENROUTER_API_KEY")
         if not api_key:
-            raise RuntimeError("OPENAI_API_KEY is missing.")
+            raise RuntimeError("OPENROUTER_API_KEY is missing.")
 
-        client = OpenAI(api_key=api_key)
+        client = OpenAI(api_key=api_key, base_url=OPENROUTER_BASE_URL)
         resp = client.chat.completions.create(
-            model=self.model,
+            model=OPENROUTER_MODEL,
             response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -230,16 +235,212 @@ class OpenAIProvider(LLMProvider):
         )
         content = resp.choices[0].message.content
         if not content:
-            raise RuntimeError("OpenAI returned empty response.")
+            raise RuntimeError("OpenRouter returned empty response.")
         return content
 
 
-def _provider_from_config(config: ScrapeConfig) -> LLMProvider:
-    if config.provider == "gemini":
-        return GeminiProvider(model=config.model)
-    if config.provider == "openai":
-        return OpenAIProvider(model=config.model)
-    raise ValueError(f"Unsupported provider: {config.provider}")
+def _llm_provider() -> LLMProvider:
+    if os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY"):
+        return GeminiProvider()
+    if os.environ.get("OPENROUTER_API_KEY"):
+        return OpenRouterProvider()
+    raise RuntimeError("Missing GOOGLE_API_KEY/GEMINI_API_KEY or OPENROUTER_API_KEY.")
+
+
+def _proxy_options(proxy_url: str | None) -> dict[str, str] | None:
+    if not proxy_url:
+        return None
+
+    parsed = urlparse(proxy_url)
+    if not parsed.scheme or not parsed.hostname:
+        raise ValueError("Proxy URL must include a scheme and host, e.g. http://user:pass@host:port")
+
+    server = f"{parsed.scheme}://{parsed.hostname}"
+    if parsed.port:
+        server = f"{server}:{parsed.port}"
+
+    proxy: dict[str, str] = {"server": server}
+    if parsed.username:
+        proxy["username"] = unquote(parsed.username)
+    if parsed.password:
+        proxy["password"] = unquote(parsed.password)
+    return proxy
+
+
+def _persistent_context_options(
+    *,
+    user_data_dir: str,
+    headless: bool,
+    proxy_url: str | None,
+) -> dict[str, Any]:
+    options: dict[str, Any] = {
+        "user_data_dir": user_data_dir,
+        "headless": headless,
+        "viewport": {"width": 1366, "height": 900},
+        "args": ["--disable-blink-features=AutomationControlled", "--disable-dev-shm-usage"],
+    }
+    proxy = _proxy_options(proxy_url)
+    if proxy:
+        options["proxy"] = proxy
+    return options
+
+
+def _load_proxy_pool(proxy_pool_path: str | None) -> list[str]:
+    if not proxy_pool_path:
+        return []
+
+    path = Path(proxy_pool_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Proxy pool file not found: {proxy_pool_path}")
+
+    proxies: list[str] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        proxy_url = line.strip()
+        if not proxy_url or proxy_url.startswith("#"):
+            continue
+        parsed = urlparse(proxy_url)
+        if parsed.scheme.lower() != "socks5":
+            continue
+        _proxy_options(proxy_url)
+        proxies.append(proxy_url)
+
+    if not proxies:
+        raise ValueError(f"Proxy pool file has no usable socks5 proxies: {proxy_pool_path}")
+    return proxies
+
+
+def _fetch_txt_to_file(raw_url: str, save_path: str) -> None:
+    response = requests.get(raw_url, timeout=30)
+    if response.status_code != 200:
+        raise RuntimeError(f"Failed to fetch proxy pool. Status code: {response.status_code}")
+
+    path = Path(save_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(response.text, encoding="utf-8")
+    print(f"File saved to: {path}")
+
+
+def _proxy_iplocate_check(proxy_url: str, timeout_s: float = 12.0) -> bool:
+    proxies = {"http": proxy_url, "https": proxy_url}
+    try:
+        response = requests.get("http://api.iplocate.io/ip", proxies=proxies, timeout=timeout_s)
+        return response.status_code == 200 and bool(response.text.strip())
+    except requests.RequestException:
+        return False
+
+
+def _redact_proxy_url(proxy_url: str) -> str:
+    parsed = urlparse(proxy_url)
+    netloc = parsed.hostname or ""
+    if parsed.port:
+        netloc = f"{netloc}:{parsed.port}"
+    return urlunparse((parsed.scheme, netloc, "", "", "", ""))
+
+
+def _is_inaccessible_error(error: Exception) -> bool:
+    error_text = str(error)
+    return any(marker in error_text for marker in INACCESSIBLE_ERROR_MARKERS)
+
+
+def _assigned_proxy_urls(profiles: list[BrowserProfileConfig], exclude_name: str | None = None) -> set[str]:
+    return {
+        profile.proxy_url
+        for profile in profiles
+        if profile.proxy_url and profile.name != exclude_name
+    }
+
+
+def _persist_profile_proxy(
+    *,
+    profiles_config_path: str,
+    profile_name: str,
+    proxy_url: str,
+) -> None:
+    path = Path(profiles_config_path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    raw_profiles = payload.get("profiles")
+    if not isinstance(raw_profiles, list):
+        raise ValueError("profiles config must contain a 'profiles' list")
+
+    updated = False
+    for raw_profile in raw_profiles:
+        if isinstance(raw_profile, dict) and raw_profile.get("name") == profile_name:
+            raw_profile["proxy_url"] = proxy_url
+            updated = True
+            break
+
+    if not updated:
+        raise ValueError(f"Could not find profile '{profile_name}' in {profiles_config_path}")
+
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    print(f"   💾 updated {profiles_config_path} for profile '{profile_name}'")
+
+
+async def _repair_profile_proxy(
+    *,
+    profile: BrowserProfileConfig,
+    profiles: list[BrowserProfileConfig],
+    profiles_config_path: str | None,
+    proxy_pool_path: str | None,
+    proxy_pool_url: str | None,
+    proxy_lock: asyncio.Lock,
+) -> BrowserProfileConfig | None:
+    if not profiles_config_path or not proxy_pool_path:
+        return None
+
+    async with proxy_lock:
+        used_proxies = _assigned_proxy_urls(profiles, exclude_name=profile.name)
+        if profile.proxy_url:
+            works = await asyncio.to_thread(_proxy_iplocate_check, profile.proxy_url)
+            if works:
+                print(f"   ✅ current proxy still passes check: {_redact_proxy_url(profile.proxy_url)}")
+                return profile
+            print(f"   ⚠️ current proxy failed check: {_redact_proxy_url(profile.proxy_url)}")
+            used_proxies.add(profile.proxy_url)
+
+        try:
+            proxy_pool = _load_proxy_pool(proxy_pool_path)
+            proxy_url = await _find_working_proxy_without_lock(proxy_pool, used_proxies)
+        except (FileNotFoundError, ValueError):
+            proxy_url = None
+
+        if not proxy_url and proxy_pool_url:
+            print("   🔄 fetching proxy pool fallback...")
+            _fetch_txt_to_file(proxy_pool_url, proxy_pool_path)
+            proxy_pool = _load_proxy_pool(proxy_pool_path)
+            proxy_url = await _find_working_proxy_without_lock(proxy_pool, used_proxies)
+
+        if not proxy_url:
+            return None
+
+        repaired = BrowserProfileConfig(
+            name=profile.name,
+            user_data_dir=profile.user_data_dir,
+            proxy_url=proxy_url,
+        )
+        _persist_profile_proxy(
+            profiles_config_path=profiles_config_path,
+            profile_name=profile.name,
+            proxy_url=proxy_url,
+        )
+        return repaired
+
+
+async def _find_working_proxy_without_lock(
+    proxy_pool: list[str],
+    used_proxies: set[str],
+) -> str | None:
+    for proxy_url in proxy_pool:
+        if proxy_url in used_proxies:
+            continue
+        print(f"   🔌 checking proxy candidate: {_redact_proxy_url(proxy_url)}")
+        works = await asyncio.to_thread(_proxy_iplocate_check, proxy_url)
+        if works:
+            used_proxies.add(proxy_url)
+            print(f"   ✅ proxy selected: {_redact_proxy_url(proxy_url)}")
+            return proxy_url
+        print(f"   ⚠️ proxy failed iplocate check: {_redact_proxy_url(proxy_url)}")
+    return None
 
 
 # =========================
@@ -256,12 +457,20 @@ SECTION_SELECTORS = {
 # Multi-signal profile readiness selectors (no strict h1 dependency)
 PROFILE_SIGNAL_SELECTORS = {
     "h1": "h1",
-    "main": "main",
     "div_ph5": "div.ph5",
     "experience_section": "section[id*='experience']",
     "education_section": "section[id*='education']",
     "profile_image": "img.pv-top-card-profile-picture__image",
 }
+
+PROFILE_TEXT_SIGNALS = ("experience", "education", "about", "activity", "skills")
+AUTH_TEXT_SIGNALS = (
+    "join linkedin",
+    "sign in",
+    "authwall",
+    "verify your identity",
+    "security verification",
+)
 
 
 async def _detect_and_raise_if_blocked(page: Any) -> None:
@@ -286,9 +495,19 @@ async def _smooth_scroll(page: Any, rounds: int = 8, pause_ms: int = 120) -> Non
 
 
 def _looks_like_expand_text(text: str) -> bool:
+    if not text:
+        return False
     t = re.sub(r"\s+", " ", text.strip().lower())
     patterns = ("see more", "show more", "more", "show all", "view more")
     return any(p in t for p in patterns)
+
+
+def _has_profile_text_signals(body_text: str) -> bool:
+    lowered = re.sub(r"\s+", " ", (body_text or "").lower())
+    if any(signal in lowered for signal in AUTH_TEXT_SIGNALS):
+        return False
+    signal_count = sum(1 for signal in PROFILE_TEXT_SIGNALS if signal in lowered)
+    return signal_count >= 2
 
 
 async def _wait_for_profile_loaded(page: Any) -> dict[str, Any]:
@@ -298,9 +517,8 @@ async def _wait_for_profile_loaded(page: Any) -> dict[str, Any]:
     Stage 2: human-like delay (2-4s)
     Stage 3: adaptive multi-signal detection loop (every 2s, max 35s)
 
-    Readiness is true when:
-    - any profile selector appears, OR
-    - fallback: URL contains /in/ and body text length > 2000
+    Readiness is true when profile-specific selectors appear, OR
+    fallback text contains multiple profile section signals.
     """
     print("   ⏳ staged profile readiness started...")
 
@@ -345,7 +563,11 @@ async def _wait_for_profile_loaded(page: Any) -> dict[str, Any]:
         except PlaywrightError:
             body_len = 0
 
-        fallback_profile = ("/in/" in current_url.lower()) and (body_len > 2000)
+        fallback_profile = (
+            "/in/" in current_url.lower()
+            and body_len > 2000
+            and _has_profile_text_signals(body_text)
+        )
 
         elapsed = time.monotonic() - start
         print(
@@ -362,7 +584,7 @@ async def _wait_for_profile_loaded(page: Any) -> dict[str, Any]:
             if detected:
                 reason = f"selector signal(s): {', '.join(detected)}"
             else:
-                reason = "fallback: URL contains /in/ and body_text > 2000"
+                reason = "fallback: URL contains /in/ and profile section text signals"
 
             print(f"   ✅ profile detected | final readiness reason: {reason}")
             print("   ⏳ stabilization delay 3000ms before snapshot")
@@ -501,7 +723,11 @@ async def _expand_all_buttons(page: Any, profile_url: str, passes: int = 1) -> i
     return total_clicked
 
 
-async def _prepare_and_capture_snapshot(page: Any, profile_url: str) -> dict[str, str]:
+async def _prepare_and_capture_snapshot(
+    page: Any,
+    profile_url: str,
+    required_signal: Literal["experience", "education"] | None = "experience",
+) -> dict[str, str]:
     """
     Full readiness + snapshot with one retry if:
     - snapshot too small
@@ -535,17 +761,31 @@ async def _prepare_and_capture_snapshot(page: Any, profile_url: str) -> dict[str
         snap = await _capture_snapshot(page)
         last_snap = snap
 
-        experience_present = await _has_experience_signal(page)
+        signal_present = True
+        if required_signal == "experience":
+            signal_present = await _has_experience_signal(page)
+        elif required_signal == "education":
+            try:
+                signal_present = await page.locator(SECTION_SELECTORS["education"]).count() > 0
+            except PlaywrightError:
+                signal_present = False
+            if not signal_present:
+                try:
+                    body_text = await page.locator("body").inner_text()
+                    signal_present = "education" in (body_text or "").lower()
+                except PlaywrightError:
+                    signal_present = False
+
         too_small = _snapshot_is_too_small(snap)
 
-        if not too_small and experience_present:
+        if not too_small and signal_present:
             return snap
 
         reason = []
         if too_small:
             reason.append("snapshot too small")
-        if not experience_present:
-            reason.append("experience section missing")
+        if not signal_present and required_signal:
+            reason.append(f"{required_signal} section missing")
         print(f"   ⚠️ snapshot quality warning: {', '.join(reason)}")
 
         if attempt == 1:
@@ -581,7 +821,7 @@ def _to_profile_data(raw_json: str) -> ProfileData:
 
 FEED_LIKE_URLS = [
     "https://www.linkedin.com/feed/",
-    "https://www.linkedin.com/mynetwork/",
+    "https://www.linkedin.com/mynetwork/",              
     "https://www.linkedin.com/notifications/",
 ]
 
@@ -611,25 +851,74 @@ async def _simulate_feed_browsing(page: Any) -> None:
 # Core scrape (single page) — uses an existing context
 # =========================
 
-async def _scrape_profile_on_page(page: Any, profile_url: str) -> dict[str, str]:
-    await page.goto(profile_url, wait_until="domcontentloaded", timeout=30000)
+def _profile_base_url(profile_url: str) -> str:
+    parsed = urlparse(profile_url)
+    path = parsed.path.rstrip("/")
+    return urlunparse((parsed.scheme, parsed.netloc, path, "", "", ""))
+
+
+def _profile_detail_url(profile_url: str, detail_name: Literal["experience", "education"]) -> str:
+    return f"{_profile_base_url(profile_url)}/details/{detail_name}/"
+
+
+async def _scrape_snapshot_on_page(
+    page: Any,
+    url: str,
+    label: str,
+    required_signal: Literal["experience", "education"] | None,
+) -> dict[str, str]:
+    print(f"   📄 opening {label}: {url}")
+    await page.goto(url, wait_until="domcontentloaded", timeout=30000)
     await page.wait_for_timeout(random.randint(700, 1600))
 
     await _detect_and_raise_if_blocked(page)
-    snap = await _prepare_and_capture_snapshot(page, profile_url=profile_url)
-    return snap
+    return await _prepare_and_capture_snapshot(page, profile_url=url, required_signal=required_signal)
+
+
+async def _scrape_profile_on_page(page: Any, profile_url: str) -> dict[str, dict[str, str]]:
+    main_snap = await _scrape_snapshot_on_page(
+        page,
+        profile_url,
+        label="main profile",
+        required_signal=None,
+    )
+    await _human_pause(1.5, 4.0)
+
+    experience_url = _profile_detail_url(profile_url, "experience")
+    experience_snap = await _scrape_snapshot_on_page(
+        page,
+        experience_url,
+        label="experience detail",
+        required_signal="experience",
+    )
+    await _human_pause(1.5, 4.0)
+
+    education_url = _profile_detail_url(profile_url, "education")
+    education_snap = await _scrape_snapshot_on_page(
+        page,
+        education_url,
+        label="education detail",
+        required_signal="education",
+    )
+
+    return {
+        "main": main_snap,
+        "experience_detail": experience_snap,
+        "education_detail": education_snap,
+    }
 
 
 async def scrape_linkedin(config: ScrapeConfig) -> ProfileData:
     """Backwards-compatible single-profile scrape (unchanged signature)."""
-    provider = _provider_from_config(config)
+    provider = _llm_provider()
 
     async with async_playwright() as p:
         context = await p.chromium.launch_persistent_context(
-            user_data_dir=config.user_data_dir,
-            headless=config.headless,
-            viewport={"width": 1366, "height": 900},
-            args=["--disable-blink-features=AutomationControlled", "--disable-dev-shm-usage"],
+            **_persistent_context_options(
+                user_data_dir=config.user_data_dir,
+                headless=config.headless,
+                proxy_url=config.proxy_url,
+            )
         )
         page = context.pages[0] if context.pages else await context.new_page()
 
@@ -638,16 +927,8 @@ async def scrape_linkedin(config: ScrapeConfig) -> ProfileData:
         finally:
             await context.close()
 
-    prompt = (
-        "Extract profile data from this already-loaded LinkedIn snapshot.\n\n"
-        f"URL:\n{snap['url']}\n\n"
-        f"MAIN_TEXT:\n{snap['main_text']}\n\n"
-        f"BODY_TEXT:\n{snap['body_text']}\n\n"
-        f"HTML:\n{snap['html']}"
-    )
-
     try:
-        raw = provider.get_completion(prompt=prompt, system_prompt=SYSTEM_PROMPT)
+        raw = provider.get_completion(prompt=_build_llm_prompt(snap), system_prompt=SYSTEM_PROMPT)
     except Exception as e:
         print(f"[LLM ERROR] {e}")
         return ProfileData()
@@ -669,109 +950,314 @@ def get_username_from_url(url: str) -> str:
     return "profile"
 
 
-def _read_csv_rows(csv_path: str) -> list[dict]:
+def _read_csv_rows(csv_path: str) -> tuple[list[dict], list[str]]:
     with open(csv_path, "r", encoding="utf-8-sig", newline="") as f:
         reader = csv.DictReader(f)
+        fieldnames = [(name or "").strip().lower() for name in (reader.fieldnames or [])]
         rows = []
         for r in reader:
             # normalize keys
             normalized = {(k or "").strip().lower(): (v or "").strip() for k, v in r.items()}
             rows.append(normalized)
-        return rows
+        return rows, fieldnames
 
 
-def _write_csv_rows(csv_path: str, rows: list[dict]) -> None:
-    fieldnames = ["profile_url", "completed_at"]
+def _write_csv_rows(csv_path: str, rows: list[dict], fieldnames: list[str]) -> None:
+    required_fields = ["profile_url", "assigned_profile", "completed_at", "error"]
+    output_fields = [field for field in fieldnames if field]
+    for field in required_fields:
+        if field not in output_fields:
+            output_fields.append(field)
+
     with open(csv_path, "w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer = csv.DictWriter(f, fieldnames=output_fields)
         writer.writeheader()
         for r in rows:
-            writer.writerow({
-                "profile_url": r.get("profile_url", ""),
-                "completed_at": r.get("completed_at", ""),
-            })
+            writer.writerow({field: r.get(field, "") for field in output_fields})
+
+
+def _utc_timestamp() -> str:
+    return datetime.utcnow().isoformat(timespec="seconds") + "Z"
+
+
+def _format_snapshot_for_prompt(title: str, snap: dict[str, str]) -> str:
+    return (
+        f"{title}\n"
+        f"URL:\n{snap['url']}\n\n"
+        f"TEXT:\n{snap['main_text']}\n\n"
+        f"BODY_TEXT:\n{snap['body_text']}\n\n"
+        f"HTML:\n{snap['html']}\n"
+    )
+
+
+def _build_llm_prompt(snap: dict[str, dict[str, str]]) -> str:
+    return "\n\n".join([
+        "Extract profile data from these already-loaded LinkedIn snapshots.",
+        "Use MAIN_PROFILE for top-card, headline, location, about, skills, and any visible current employment.",
+        "Use EXPERIENCE_DETAIL as the primary source for experience and current_employment.",
+        "Use EDUCATION_DETAIL as the primary source for education.",
+        _format_snapshot_for_prompt("MAIN_PROFILE", snap["main"]),
+        _format_snapshot_for_prompt("EXPERIENCE_DETAIL", snap["experience_detail"]),
+        _format_snapshot_for_prompt("EDUCATION_DETAIL", snap["education_detail"]),
+    ])
+
+
+def _extract_profile_data_from_snapshot(llm: LLMProvider, snap: dict[str, dict[str, str]]) -> ProfileData:
+    raw = llm.get_completion(prompt=_build_llm_prompt(snap), system_prompt=SYSTEM_PROMPT)
+    return _to_profile_data(raw)
+
+
+def _load_profile_configs(config_path: str | None, fallback_user_data_dir: str) -> list[BrowserProfileConfig]:
+    if not config_path:
+        return [BrowserProfileConfig(name="primary", user_data_dir=fallback_user_data_dir)]
+
+    with open(config_path, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+
+    raw_profiles = payload.get("profiles")
+    if not isinstance(raw_profiles, list) or not raw_profiles:
+        raise ValueError("profiles config must contain a non-empty 'profiles' list")
+
+    profiles: list[BrowserProfileConfig] = []
+    seen_names: set[str] = set()
+    seen_dirs: set[str] = set()
+    seen_proxies: set[str] = set()
+
+    for idx, raw in enumerate(raw_profiles, start=1):
+        if not isinstance(raw, dict):
+            raise ValueError(f"profile #{idx} must be an object")
+
+        name = str(raw.get("name") or f"profile_{idx}").strip()
+        user_data_dir = str(raw.get("user_data_dir") or "").strip()
+        proxy_url = raw.get("proxy_url")
+        proxy_url = str(proxy_url).strip() if proxy_url else None
+
+        if not user_data_dir:
+            raise ValueError(f"profile '{name}' is missing user_data_dir")
+        if name in seen_names:
+            raise ValueError(f"duplicate profile name: {name}")
+        if user_data_dir in seen_dirs:
+            raise ValueError(f"duplicate user_data_dir: {user_data_dir}")
+        _proxy_options(proxy_url)
+        if proxy_url:
+            if proxy_url in seen_proxies:
+                raise ValueError(f"duplicate proxy_url assigned in profiles config: {_redact_proxy_url(proxy_url)}")
+            seen_proxies.add(proxy_url)
+
+        seen_names.add(name)
+        seen_dirs.add(user_data_dir)
+        profiles.append(BrowserProfileConfig(name=name, user_data_dir=user_data_dir, proxy_url=proxy_url))
+
+    return profiles
+
+
+def _assign_pending_rows(rows: list[dict], profiles: list[BrowserProfileConfig]) -> dict[str, list[int]]:
+    assignments = {profile.name: [] for profile in profiles}
+    pending_indexes = [
+        idx
+        for idx, row in enumerate(rows)
+        if row.get("profile_url") and not row.get("completed_at")
+    ]
+    if not pending_indexes:
+        return assignments
+
+    base_size, extra = divmod(len(pending_indexes), len(profiles))
+    offset = 0
+    for profile_index, profile in enumerate(profiles):
+        chunk_size = base_size + (1 if profile_index < extra else 0)
+        chunk = pending_indexes[offset:offset + chunk_size]
+        assignments[profile.name] = chunk
+        for row_idx in chunk:
+            rows[row_idx]["assigned_profile"] = profile.name
+            rows[row_idx]["error"] = ""
+        offset += chunk_size
+
+    return assignments
+
+
+async def _persist_csv_rows(
+    *,
+    csv_path: str,
+    rows: list[dict],
+    fieldnames: list[str],
+    csv_lock: asyncio.Lock,
+) -> None:
+    async with csv_lock:
+        _write_csv_rows(csv_path, rows, fieldnames)
+
+
+async def _scrape_profile_assignment(
+    *,
+    playwright: Any,
+    profile: BrowserProfileConfig,
+    profiles: list[BrowserProfileConfig],
+    row_indexes: list[int],
+    rows: list[dict],
+    fieldnames: list[str],
+    csv_path: str,
+    csv_lock: asyncio.Lock,
+    proxy_lock: asyncio.Lock,
+    llm: LLMProvider,
+    headless: bool,
+    output_dir: str,
+    profiles_config_path: str | None,
+) -> None:
+    if not row_indexes:
+        print(f"\n[{profile.name}] no pending rows assigned")
+        return
+
+    async def launch_context() -> tuple[Any, Any]:
+        context = await playwright.chromium.launch_persistent_context(
+            **_persistent_context_options(
+                user_data_dir=profile.user_data_dir,
+                headless=headless,
+                proxy_url=profile.proxy_url,
+            )
+        )
+        page = context.pages[0] if context.pages else await context.new_page()
+        return context, page
+
+    def replace_shared_profile(repaired_profile: BrowserProfileConfig) -> None:
+        for idx, existing_profile in enumerate(profiles):
+            if existing_profile.name == repaired_profile.name:
+                profiles[idx] = repaired_profile
+                return
+
+    print(f"\n[{profile.name}] starting {len(row_indexes)} assigned profile(s)")
+    context, page = await launch_context()
+
+    # warm-up: behave like a human landing on LinkedIn
+    await _simulate_feed_browsing(page)
+
+    try:
+        for position, row_index in enumerate(row_indexes, start=1):
+            row = rows[row_index]
+            csv_position = row_index + 1
+            total_assigned = len(row_indexes)
+            url = row.get("profile_url", "")
+            if not url:
+                continue
+
+            print(f"\n[{profile.name} {position}/{total_assigned} | row {csv_position}] 🔎 scraping: {url}")
+
+            try:
+                try:
+                    snap = await _scrape_profile_on_page(page, url)
+                except Exception as first_error:
+                    if not _is_inaccessible_error(first_error):
+                        raise
+
+                    print("   ⚠️ LinkedIn/page inaccessible; checking assigned proxy...")
+                    repaired_profile = await _repair_profile_proxy(
+                        profile=profile,
+                        profiles=profiles,
+                        profiles_config_path=profiles_config_path,
+                        proxy_pool_path=PROXY_POOL_PATH,
+                        proxy_pool_url=PROXY_POOL_URL,
+                        proxy_lock=proxy_lock,
+                    )
+                    if not repaired_profile:
+                        raise first_error
+
+                    await context.close()
+                    profile = repaired_profile
+                    replace_shared_profile(repaired_profile)
+                    context, page = await launch_context()
+                    print("   🔁 retrying row once after proxy check/repair...")
+                    snap = await _scrape_profile_on_page(page, url)
+
+                data = _extract_profile_data_from_snapshot(llm, snap)
+            except Exception as e:
+                error = str(e)
+                print(f"   ❌ scrape/extract error: {error}")
+                row["error"] = error
+                row["completed_at"] = ""
+                await _persist_csv_rows(
+                    csv_path=csv_path,
+                    rows=rows,
+                    fieldnames=fieldnames,
+                    csv_lock=csv_lock,
+                )
+                continue
+
+            username = get_username_from_url(url)
+            file_path = os.path.join(output_dir, f"{username}.json")
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(data.model_dump(), f, indent=2, ensure_ascii=False)
+            print(f"   ✅ saved {file_path}")
+
+            # mark completed + persist CSV after every profile
+            row["assigned_profile"] = profile.name
+            row["completed_at"] = _utc_timestamp()
+            row["error"] = ""
+            await _persist_csv_rows(
+                csv_path=csv_path,
+                rows=rows,
+                fieldnames=fieldnames,
+                csv_lock=csv_lock,
+            )
+
+            # human noise between profiles
+            if position < total_assigned:
+                # occasionally browse feed
+                if random.random() < 0.35:
+                    await _simulate_feed_browsing(page)
+                await _human_pause(4.0, 12.0)
+    finally:
+        await context.close()
 
 
 async def scrape_from_csv(
     csv_path: str,
-    provider: str = "gemini",
-    model: str = "gemini-2.5-flash",
     user_data_dir: str = "linkedin_session",
     headless: bool = True,
     output_dir: str = "data",
+    profiles_config: str | None = None,
 ) -> None:
-    rows = _read_csv_rows(csv_path)
+    rows, fieldnames = _read_csv_rows(csv_path)
     if not rows:
         print(f"❌ No rows in {csv_path}")
         return
 
     os.makedirs(output_dir, exist_ok=True)
-    llm = _provider_from_config(ScrapeConfig(profile_url="", provider=provider, model=model))
+    llm = _llm_provider()
+    profiles = _load_profile_configs(profiles_config, fallback_user_data_dir=user_data_dir)
+    assignments = _assign_pending_rows(rows, profiles)
+    _write_csv_rows(csv_path, rows, fieldnames)
+    csv_lock = asyncio.Lock()
+    proxy_lock = asyncio.Lock()
 
     async with async_playwright() as p:
-        context = await p.chromium.launch_persistent_context(
-            user_data_dir=user_data_dir,
-            headless=headless,
-            viewport={"width": 1366, "height": 900},
-            args=["--disable-blink-features=AutomationControlled", "--disable-dev-shm-usage"],
-        )
-        page = context.pages[0] if context.pages else await context.new_page()
+        workers = [
+            _scrape_profile_assignment(
+                playwright=p,
+                profile=profile,
+                profiles=profiles,
+                row_indexes=assignments.get(profile.name, []),
+                rows=rows,
+                fieldnames=fieldnames,
+                csv_path=csv_path,
+                csv_lock=csv_lock,
+                proxy_lock=proxy_lock,
+                llm=llm,
+                headless=headless,
+                output_dir=output_dir,
+                profiles_config_path=profiles_config,
+            )
+            for profile in profiles
+        ]
 
-        # warm-up: behave like a human landing on LinkedIn
-        await _simulate_feed_browsing(page)
+        if len(profiles) > 1:
+            print(f"\n⚡ running {len(profiles)} browser profile workers in parallel")
+            await asyncio.gather(*workers)
+        else:
+            for worker in workers:
+                await worker
 
-        try:
-            total = len(rows)
-            for idx, row in enumerate(rows, start=1):
-                url = row.get("profile_url", "")
-                if not url:
-                    continue
-
-                if row.get("completed_at"):
-                    print(f"[{idx}/{total}] ⏭  skip (already done): {url}")
-                    continue
-
-                print(f"\n[{idx}/{total}] 🔎 scraping: {url}")
-
-                try:
-                    snap = await _scrape_profile_on_page(page, url)
-                except Exception as e:
-                    print(f"   ❌ navigation/scrape error: {e}")
-                    continue
-
-                prompt = (
-                    "Extract profile data from this already-loaded LinkedIn snapshot.\n\n"
-                    f"URL:\n{snap['url']}\n\n"
-                    f"MAIN_TEXT:\n{snap['main_text']}\n\n"
-                    f"BODY_TEXT:\n{snap['body_text']}\n\n"
-                    f"HTML:\n{snap['html']}"
-                )
-
-                try:
-                    raw = llm.get_completion(prompt=prompt, system_prompt=SYSTEM_PROMPT)
-                    data = _to_profile_data(raw)
-                except Exception as e:
-                    print(f"   ❌ LLM/parse error: {e}")
-                    data = ProfileData()
-
-                username = get_username_from_url(url)
-                file_path = os.path.join(output_dir, f"{username}.json")
-                with open(file_path, "w", encoding="utf-8") as f:
-                    json.dump(data.model_dump(), f, indent=2, ensure_ascii=False)
-                print(f"   ✅ saved {file_path}")
-
-                # mark completed + persist CSV after every profile
-                row["completed_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
-                _write_csv_rows(csv_path, rows)
-
-                # human noise between profiles
-                if idx < total:
-                    # occasionally browse feed
-                    if random.random() < 0.35:
-                        await _simulate_feed_browsing(page)
-                    await _human_pause(4.0, 12.0)
-        finally:
-            await context.close()
+        total = len(rows)
+        completed = sum(1 for row in rows if row.get("completed_at"))
+        failed = sum(1 for row in rows if row.get("error") and not row.get("completed_at"))
+        print(f"\n✅ batch finished | rows={total} completed={completed} failed={failed}")
 
 
 # =========================
@@ -779,43 +1265,46 @@ async def scrape_from_csv(
 # =========================
 
 async def main():
-    args = sys.argv[1:]
+    parser = argparse.ArgumentParser()
+    parser.add_argument("url", nargs="?", help="LinkedIn profile URL for single-profile mode")
+    parser.add_argument("--csv", dest="csv_path", help="CSV file with a profile_url column")
+    parser.add_argument("--profiles-config", help="JSON config for one or more browser profiles")
+    parser.add_argument("--user-data-dir", default="linkedin_session")
+    parser.add_argument("--output-dir", default="data")
+    parser.add_argument("--headless", choices=["true", "false"], default="true")
+    parser.add_argument("--proxy-url", help="Proxy URL for single-profile mode")
+    args = parser.parse_args()
 
-    # CSV mode: python script.py --csv profiles.csv
-    if args and args[0] == "--csv":
-        if len(args) < 2:
-            print("❌ Usage: python script.py --csv <path-to-csv>")
-            return
-        csv_path = args[1]
+    headless = args.headless == "true"
+
+    # CSV mode: python -m linkedin_tool.extractor --csv profiles.csv
+    if args.csv_path:
         await scrape_from_csv(
-            csv_path=csv_path,
-            provider="gemini",
-            model="gemini-2.5-flash",
-            user_data_dir="linkedin_session",
-            headless=True,
-            output_dir="data",
+            csv_path=args.csv_path,
+            user_data_dir=args.user_data_dir,
+            headless=headless,
+            output_dir=args.output_dir,
+            profiles_config=args.profiles_config,
         )
         return
 
     # Original manual single-URL mode (unchanged behavior)
-    url = args[0] if args else None
-    if not url:
+    if not args.url:
         print("❌ Please provide LinkedIn URL  OR  --csv <file.csv>")
         return
 
     config = ScrapeConfig(
-        profile_url=url,
-        provider="gemini",
-        model="gemini-2.5-flash",
-        user_data_dir="linkedin_session",
-        headless=True,
+        profile_url=args.url,
+        user_data_dir=args.user_data_dir,
+        headless=headless,
+        proxy_url=args.proxy_url,
     )
 
     data = await scrape_linkedin(config)
 
-    username = get_username_from_url(url)
-    os.makedirs("data", exist_ok=True)
-    file_path = f"data/{username}.json"
+    username = get_username_from_url(args.url)
+    os.makedirs(args.output_dir, exist_ok=True)
+    file_path = os.path.join(args.output_dir, f"{username}.json")
 
     with open(file_path, "w", encoding="utf-8") as f:
         json.dump(data.model_dump(), f, indent=2, ensure_ascii=False)

@@ -1,0 +1,5 @@
+# Put trusted authenticated proxies in proxies.txt, one per line.
+# Existing proxy_url values in profiles.json are used first.
+# If a profile's assigned proxy fails, the script checks proxies.txt for a replacement.
+socks5://user:pass@proxy1.example.com:1080
+socks5://user:pass@proxy2.example.com:1080

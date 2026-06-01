@@ -1,0 +1,6 @@
+playwright
+pydantic
+google-genai
+openai
+python-dotenv
+requests[socks]

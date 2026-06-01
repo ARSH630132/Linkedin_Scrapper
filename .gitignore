@@ -5,6 +5,7 @@
 # =============== CRITICAL: SESSIONS & CREDENTIALS ===============
 # LinkedIn login sessions, cookies, aur private tokens (Do not push!)
 linkedinsession
+linkedin_session*
 linkedinsession/
 linkedinsession*
 session.json
