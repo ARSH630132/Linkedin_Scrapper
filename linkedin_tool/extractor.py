@@ -71,7 +71,7 @@ class ProfileData(BaseModel):
 class ScrapeConfig:
     profile_url: str
     user_data_dir: str = "linkedin_session"
-    headless: bool = True
+    headless: bool = False
     proxy_url: str | None = None
 
 
@@ -851,6 +851,16 @@ async def _simulate_feed_browsing(page: Any) -> None:
 # Core scrape (single page) — uses an existing context
 # =========================
 
+def normalize_url(url: str) -> str:
+    if not url:
+        return url
+    if url.startswith("www."):
+        return "https://" + url
+    if not url.startswith("http"):
+        return "https://" + url
+    return url
+
+
 def _profile_base_url(profile_url: str) -> str:
     parsed = urlparse(profile_url)
     path = parsed.path.rstrip("/")
@@ -923,7 +933,7 @@ async def scrape_linkedin(config: ScrapeConfig) -> ProfileData:
         page = context.pages[0] if context.pages else await context.new_page()
 
         try:
-            snap = await _scrape_profile_on_page(page, config.profile_url)
+            snap = await _scrape_profile_on_page(page, normalize_url(config.profile_url))
         finally:
             await context.close()
 
@@ -1134,7 +1144,7 @@ async def _scrape_profile_assignment(
             row = rows[row_index]
             csv_position = row_index + 1
             total_assigned = len(row_indexes)
-            url = row.get("profile_url", "")
+            url = normalize_url(row.get("profile_url", ""))
             if not url:
                 continue
 
@@ -1210,7 +1220,7 @@ async def _scrape_profile_assignment(
 async def scrape_from_csv(
     csv_path: str,
     user_data_dir: str = "linkedin_session",
-    headless: bool = True,
+    headless: bool = False,
     output_dir: str = "data",
     profiles_config: str | None = None,
 ) -> None:

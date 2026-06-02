@@ -3,12 +3,10 @@
     {
       "name": "primary",
       "user_data_dir": "linkedin_session",
-      "proxy_url": null
+      "proxy_url": "socks5://174.75.211.193:4145"
     },
     {
       "name": "secondary",
-      "user_data_dir": "linkedin_session_2",
-      "proxy_url": "http://user:pass@host:port"
-    }
-  ]
-}
+      "user_data_dir": "linkedin_session_1",
+      "proxy_url": "http://107.150.97.83:3128"
+    }]}'@ | Set-Content profiles.json
