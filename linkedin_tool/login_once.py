@@ -47,7 +47,7 @@ async def save_session(user_data_dir: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--user-data-dir", default="linkedin_session")
+    parser.add_argument("--user-data-dir", default="linkedin_session_1")
     args = parser.parse_args()
     asyncio.run(save_session(args.user_data_dir))
 

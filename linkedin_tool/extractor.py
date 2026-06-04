@@ -316,9 +316,29 @@ def _fetch_txt_to_file(raw_url: str, save_path: str) -> None:
 
     path = Path(save_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(response.text, encoding="utf-8")
-    print(f"File saved to: {path}")
 
+    existing_proxies = set()
+    if path.exists():
+        existing_proxies = {
+            line.strip()
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        }
+
+    new_proxies = {
+    line.strip()
+    for line in response.text.splitlines()
+    if line.strip() and line.strip().startswith("socks5://")
+    }
+
+    merged_proxies = list(existing_proxies | new_proxies)
+
+    path.write_text("\n".join(merged_proxies) + "\n", encoding="utf-8")
+
+    print(f"File updated: {path}")
+    print(f"Existing kept: {len(existing_proxies)}")
+    print(f"New fetched: {len(new_proxies)}")
+    print(f"Total proxies now: {len(merged_proxies)}")
 
 def _proxy_iplocate_check(proxy_url: str, timeout_s: float = 12.0) -> bool:
     proxies = {"http": proxy_url, "https": proxy_url}
@@ -357,6 +377,8 @@ def _persist_profile_proxy(
     proxy_url: str,
 ) -> None:
     path = Path(profiles_config_path)
+    print(f"   📁 updating profiles file: {path.resolve()}")
+    print(f"   🔁 {profile_name} proxy set to: {_redact_proxy_url(proxy_url)}")
     payload = json.loads(path.read_text(encoding="utf-8"))
     raw_profiles = payload.get("profiles")
     if not isinstance(raw_profiles, list):
@@ -395,12 +417,16 @@ async def _repair_profile_proxy(
             if works:
                 print(f"   ✅ current proxy still passes check: {_redact_proxy_url(profile.proxy_url)}")
                 return profile
+
             print(f"   ⚠️ current proxy failed check: {_redact_proxy_url(profile.proxy_url)}")
             used_proxies.add(profile.proxy_url)
 
+            if proxy_pool_path:
+                _remove_proxy_from_file(proxy_pool_path, profile.proxy_url)
+
         try:
             proxy_pool = _load_proxy_pool(proxy_pool_path)
-            proxy_url = await _find_working_proxy_without_lock(proxy_pool, used_proxies)
+            proxy_url = await _find_working_proxy_without_lock(proxy_pool, used_proxies, proxy_pool_path)
         except (FileNotFoundError, ValueError):
             proxy_url = None
 
@@ -408,7 +434,7 @@ async def _repair_profile_proxy(
             print("   🔄 fetching proxy pool fallback...")
             _fetch_txt_to_file(proxy_pool_url, proxy_pool_path)
             proxy_pool = _load_proxy_pool(proxy_pool_path)
-            proxy_url = await _find_working_proxy_without_lock(proxy_pool, used_proxies)
+            proxy_url = await _find_working_proxy_without_lock(proxy_pool, used_proxies, proxy_pool_path)
 
         if not proxy_url:
             return None
@@ -425,24 +451,39 @@ async def _repair_profile_proxy(
         )
         return repaired
 
+def _remove_proxy_from_file(proxy_pool_path: str, bad_proxy: str) -> None:
+    path = Path(proxy_pool_path)
+    if not path.exists():
+        return
+
+    lines = path.read_text(encoding="utf-8").splitlines()
+    new_lines = [line for line in lines if line.strip() != bad_proxy]
+
+    path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    print(f"   🗑️ removed bad proxy from file: {_redact_proxy_url(bad_proxy)}")
 
 async def _find_working_proxy_without_lock(
     proxy_pool: list[str],
     used_proxies: set[str],
+    proxy_pool_path: str | None = None,
 ) -> str | None:
     for proxy_url in proxy_pool:
         if proxy_url in used_proxies:
             continue
+
         print(f"   🔌 checking proxy candidate: {_redact_proxy_url(proxy_url)}")
         works = await asyncio.to_thread(_proxy_iplocate_check, proxy_url)
+
         if works:
             used_proxies.add(proxy_url)
             print(f"   ✅ proxy selected: {_redact_proxy_url(proxy_url)}")
             return proxy_url
         print(f"   ⚠️ proxy failed iplocate check: {_redact_proxy_url(proxy_url)}")
+
+        if proxy_pool_path:
+            _remove_proxy_from_file(proxy_pool_path, proxy_url)
+
     return None
-
-
 # =========================
 # Playwright helpers
 # =========================
