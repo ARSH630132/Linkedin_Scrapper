@@ -36,6 +36,10 @@ logs/
 *.xlsx
 *.json
 *.html
+!package.json
+!package-lock.json
+!tsconfig.json
+!components.json
 
 # =============== PYTHON DEPENDENCIES & VIRTUAL ENVS ===============
 # Python environments aur cache (Agar Selenium/Playwright use ho raha ho)
@@ -53,6 +57,7 @@ __pycache__/
 # =============== NODE / JAVASCRIPT DEPENDENCIES ===============
 # Node modules aur npm/yarn ke logs (Agar Puppeteer use ho raha ho)
 node_modules/
+.next/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
