@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
-import { Save } from "lucide-react";
+import { KeyRound, Save } from "lucide-react";
 import { api } from "@/lib/api";
 import type { Settings } from "@/types";
 import { Button } from "@/components/ui/button";
@@ -45,7 +45,37 @@ export default function SettingsPage() {
             <>
               <div>
                 <label className="text-sm font-medium">Backend API URL</label>
-                <Input className="mt-2" value={settings.backendApiUrl} onChange={(event) => update("backendApiUrl", event.target.value)} />
+                <Input className="mt-2" placeholder="Leave blank to use this Next.js app's /api routes" value={settings.backendApiUrl} onChange={(event) => update("backendApiUrl", event.target.value)} />
+                <p className="mt-2 text-xs text-muted-foreground">Blank uses the built-in dashboard API bridge. Set this only if you run a separate backend server.</p>
+              </div>
+              <div className="rounded-lg border p-4">
+                <div className="mb-4 flex items-center gap-2">
+                  <KeyRound className="h-4 w-4 text-primary" />
+                  <p className="text-sm font-semibold">LLM API key</p>
+                </div>
+                <div className="grid gap-4 sm:grid-cols-[180px_1fr]">
+                  <div>
+                    <label className="text-sm font-medium">Provider</label>
+                    <select
+                      className="mt-2 flex h-10 w-full rounded-md border bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      value={settings.apiProvider}
+                      onChange={(event) => update("apiProvider", event.target.value as Settings["apiProvider"])}
+                    >
+                      <option value="gemini">Gemini</option>
+                      <option value="openrouter">GPT/OpenRouter</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-sm font-medium">{settings.apiProvider === "gemini" ? "Gemini API key" : "OpenRouter API key"}</label>
+                    <Input
+                      className="mt-2"
+                      type="password"
+                      placeholder={settings.apiProvider === "gemini" ? "GOOGLE_API_KEY or GEMINI_API_KEY" : "OPENROUTER_API_KEY"}
+                      value={settings.apiKey}
+                      onChange={(event) => update("apiKey", event.target.value)}
+                    />
+                  </div>
+                </div>
               </div>
               <div className="grid gap-4 sm:grid-cols-2">
                 <div>

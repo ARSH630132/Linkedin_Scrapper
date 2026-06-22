@@ -2,12 +2,14 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
-import { Download, Search } from "lucide-react";
+import { BriefcaseBusiness, Download, GraduationCap, Search, Sparkles, UserRound } from "lucide-react";
 import { api } from "@/lib/api";
 import type { ProfileResult } from "@/types";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { Badge } from "@/components/ui/badge";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { PageHeader } from "@/components/page-header";
 import { StatusBadge } from "@/components/status-badge";
@@ -45,16 +47,23 @@ export default function ResultsPage() {
   }
 
   function exportCsv() {
-    const headers = ["name", "headline", "location", "experience", "education", "email", "status"];
+    const headers = ["full_name", "headline", "location", "about", "current_title", "current_company", "current_duration", "current_location", "experience", "education", "skills", "email", "status", "source_file"];
     const lines = filtered.map((profile) =>
       [
         profile.full_name,
         profile.headline,
         profile.location,
-        profile.experience.map((item) => `${item.role} at ${item.company}`).join("; "),
-        profile.education.map((item) => item.school).join("; "),
+        profile.about,
+        profile.current_employment.title,
+        profile.current_employment.company,
+        profile.current_employment.duration,
+        profile.current_employment.location,
+        profile.experience.map((item) => `${item.role} | ${item.company} | ${item.duration} | ${item.location} | ${item.description}`).join("; "),
+        profile.education.map((item) => `${item.school} | ${item.degree} | ${item.field_of_study}`).join("; "),
+        profile.skills.join("; "),
         profile.email ?? "",
-        profile.status
+        profile.status,
+        profile.sourceFile ?? ""
       ].map((cell) => `"${String(cell).replaceAll('"', '""')}"`).join(",")
     );
     download("linkedin-results.csv", [headers.join(","), ...lines].join("\n"), "text/csv");
@@ -99,22 +108,39 @@ export default function ResultsPage() {
                     <TableHead>Name</TableHead>
                     <TableHead>Headline</TableHead>
                     <TableHead>Location</TableHead>
+                    <TableHead>Current Role</TableHead>
                     <TableHead>Experience</TableHead>
                     <TableHead>Education</TableHead>
+                    <TableHead>Skills</TableHead>
                     <TableHead>Email</TableHead>
                     <TableHead>Status</TableHead>
+                    <TableHead className="text-right">Details</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {filtered.map((profile) => (
-                    <TableRow key={profile.id}>
+                    <TableRow key={profile.id} className="transition-colors hover:bg-primary/5">
                       <TableCell className="min-w-44 font-medium">{profile.full_name || "Unknown"}</TableCell>
                       <TableCell className="min-w-72">{profile.headline || "-"}</TableCell>
                       <TableCell className="min-w-44">{profile.location || "-"}</TableCell>
+                      <TableCell className="min-w-52">
+                        {profile.current_employment.title ? (
+                          <div>
+                            <p className="font-medium">{profile.current_employment.title}</p>
+                            <p className="text-xs text-muted-foreground">{profile.current_employment.company}</p>
+                          </div>
+                        ) : "-"}
+                      </TableCell>
                       <TableCell>{profile.experience.length}</TableCell>
                       <TableCell>{profile.education.length}</TableCell>
+                      <TableCell>{profile.skills.length}</TableCell>
                       <TableCell>{profile.email || "-"}</TableCell>
                       <TableCell><StatusBadge status={profile.status} /></TableCell>
+                      <TableCell>
+                        <div className="flex justify-end">
+                          <ProfileDetailsDialog profile={profile} />
+                        </div>
+                      </TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
@@ -124,5 +150,153 @@ export default function ResultsPage() {
         </CardContent>
       </Card>
     </motion.div>
+  );
+}
+
+function ProfileDetailsDialog({ profile }: { profile: ProfileResult }) {
+  return (
+    <Dialog>
+      <DialogTrigger asChild>
+        <Button variant="outline" size="sm">View</Button>
+      </DialogTrigger>
+      <DialogContent className="max-h-[88vh] max-w-5xl overflow-y-auto scrollbar-soft">
+        <DialogHeader>
+          <DialogTitle>{profile.full_name || "Unknown profile"}</DialogTitle>
+          <DialogDescription>{profile.headline || "No headline extracted"}</DialogDescription>
+        </DialogHeader>
+
+        <div className="grid gap-4 lg:grid-cols-[0.85fr_1.15fr]">
+          <Card className="shadow-none">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 text-sm"><UserRound className="h-4 w-4 text-primary" />Profile</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <Table>
+                <TableBody>
+                  <FieldRow label="Full name" value={profile.full_name} />
+                  <FieldRow label="Headline" value={profile.headline} />
+                  <FieldRow label="Location" value={profile.location} />
+                  <FieldRow label="Source file" value={profile.sourceFile ?? ""} />
+                  <FieldRow label="Status" value={profile.status} />
+                </TableBody>
+              </Table>
+            </CardContent>
+          </Card>
+
+          <Card className="shadow-none">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 text-sm"><BriefcaseBusiness className="h-4 w-4 text-primary" />Current Employment</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <Table>
+                <TableBody>
+                  <FieldRow label="Title" value={profile.current_employment.title} />
+                  <FieldRow label="Company" value={profile.current_employment.company} />
+                  <FieldRow label="Duration" value={profile.current_employment.duration} />
+                  <FieldRow label="Location" value={profile.current_employment.location} />
+                </TableBody>
+              </Table>
+            </CardContent>
+          </Card>
+        </div>
+
+        <Card className="shadow-none">
+          <CardHeader>
+            <CardTitle className="text-sm">About</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="whitespace-pre-wrap rounded-lg border bg-secondary/30 p-4 text-sm leading-6">{profile.about || "No about section extracted."}</p>
+          </CardContent>
+        </Card>
+
+        <Card className="shadow-none">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-sm"><BriefcaseBusiness className="h-4 w-4 text-primary" />Experience</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="overflow-auto rounded-lg border">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Role</TableHead>
+                    <TableHead>Company</TableHead>
+                    <TableHead>Duration</TableHead>
+                    <TableHead>Location</TableHead>
+                    <TableHead>Description</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {profile.experience.length ? profile.experience.map((item, index) => (
+                    <TableRow key={`${item.role}-${index}`} className="hover:bg-primary/5">
+                      <TableCell className="min-w-44 font-medium">{item.role || "-"}</TableCell>
+                      <TableCell className="min-w-40">{item.company || "-"}</TableCell>
+                      <TableCell className="min-w-44">{item.duration || "-"}</TableCell>
+                      <TableCell className="min-w-52">{item.location || "-"}</TableCell>
+                      <TableCell className="min-w-96 whitespace-pre-wrap leading-6">{item.description || "-"}</TableCell>
+                    </TableRow>
+                  )) : <EmptyTableRow colSpan={5} label="No experience extracted" />}
+                </TableBody>
+              </Table>
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card className="shadow-none">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-sm"><GraduationCap className="h-4 w-4 text-primary" />Education</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="overflow-hidden rounded-lg border">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>School</TableHead>
+                    <TableHead>Degree</TableHead>
+                    <TableHead>Field of study</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {profile.education.length ? profile.education.map((item, index) => (
+                    <TableRow key={`${item.school}-${index}`} className="hover:bg-primary/5">
+                      <TableCell className="font-medium">{item.school || "-"}</TableCell>
+                      <TableCell>{item.degree || "-"}</TableCell>
+                      <TableCell>{item.field_of_study || "-"}</TableCell>
+                    </TableRow>
+                  )) : <EmptyTableRow colSpan={3} label="No education extracted" />}
+                </TableBody>
+              </Table>
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card className="shadow-none">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-sm"><Sparkles className="h-4 w-4 text-primary" />Skills</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="flex flex-wrap gap-2">
+              {profile.skills.length ? profile.skills.map((skill) => <Badge key={skill} variant="secondary">{skill}</Badge>) : <span className="text-sm text-muted-foreground">No skills extracted.</span>}
+            </div>
+          </CardContent>
+        </Card>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function FieldRow({ label, value }: { label: string; value: string }) {
+  return (
+    <TableRow>
+      <TableCell className="w-36 text-xs font-semibold uppercase text-muted-foreground">{label}</TableCell>
+      <TableCell>{value || "-"}</TableCell>
+    </TableRow>
+  );
+}
+
+function EmptyTableRow({ colSpan, label }: { colSpan: number; label: string }) {
+  return (
+    <TableRow>
+      <TableCell colSpan={colSpan} className="py-8 text-center text-muted-foreground">{label}</TableCell>
+    </TableRow>
   );
 }

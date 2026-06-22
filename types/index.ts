@@ -30,6 +30,8 @@ export interface ScrapeJob {
   id: string;
   name: string;
   status: JobStatus;
+  processId?: number;
+  csvPath?: string;
   progress: number;
   totalProfiles: number;
   completedProfiles: number;
@@ -70,6 +72,7 @@ export interface EducationItem {
 export interface ProfileResult {
   id: string;
   jobId: string;
+  sourceFile?: string;
   profileUrl: string;
   full_name: string;
   headline: string;
@@ -104,6 +107,8 @@ export interface ProxyItem {
 
 export interface Settings {
   backendApiUrl: string;
+  apiProvider: "gemini" | "openrouter";
+  apiKey: string;
   maxParallelWorkers: number;
   headless: boolean;
   retryCount: number;

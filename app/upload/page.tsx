@@ -20,6 +20,7 @@ export default function UploadPage() {
   const [rows, setRows] = useState<CsvPreviewRow[]>([]);
   const [uploadId, setUploadId] = useState<string | undefined>();
   const [loading, setLoading] = useState(false);
+  const [profiles, setProfiles] = useState<any[]>([]);
   const { toast } = useToast();
 
   const validCount = useMemo(() => rows.filter((row) => row.valid).length, [rows]);
@@ -57,19 +58,43 @@ export default function UploadPage() {
   }
 
   async function startScraping() {
-    if (!file || validCount === 0) return;
-    setLoading(true);
-    try {
-      const upload = await api.uploadCsv(file);
-      const job = await api.startScraping({ uploadId: upload.uploadId || uploadId, profileUrls: rows.filter((row) => row.valid).map((row) => row.profile_url) });
-      setUploadId(upload.uploadId);
-      toast({ kind: "success", title: "Scraping started", description: `${job.name} is now running.` });
-    } catch (error) {
-      toast({ kind: "error", title: "Start failed", description: error instanceof Error ? error.message : "Backend request failed." });
-    } finally {
-      setLoading(false);
+  if (!file || validCount === 0) return;
+
+  setLoading(true);
+  setProfiles([]);
+
+  try {
+    const formData = new FormData();
+    formData.append("file", file);
+
+    const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/scrape/csv`, {
+      method: "POST",
+      body: formData,
+    });
+
+    const result = await res.json();
+
+    if (!res.ok) {
+      throw new Error(result.detail || "Backend request failed.");
     }
+
+    setProfiles(result.data?.profiles || []);
+
+    toast({
+      kind: "success",
+      title: "Scraping completed",
+      description: `${result.data?.total_profiles || 0} profiles extracted.`,
+    });
+  } catch (error) {
+    toast({
+      kind: "error",
+      title: "Scraping failed",
+      description: error instanceof Error ? error.message : "Backend request failed.",
+    });
+  } finally {
+    setLoading(false);
   }
+}
 
   return (
     <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }}>
@@ -114,7 +139,7 @@ export default function UploadPage() {
 
             <Button className="mt-5 w-full" disabled={!hasProfileColumn || validCount === 0 || loading} onClick={startScraping}>
               <Play className="h-4 w-4" />
-              {loading ? "Starting..." : "Start Scraping"}
+              {loading ? "Scraping..." : "Start Scraping"}
             </Button>
           </CardContent>
         </Card>
@@ -158,6 +183,86 @@ export default function UploadPage() {
           </CardContent>
         </Card>
       </div>
+      {profiles.length > 0 && (
+  <Card className="mt-6">
+    <CardHeader>
+      <CardTitle>Scraped Profiles</CardTitle>
+      <CardDescription>Complete extracted LinkedIn profile data.</CardDescription>
+    </CardHeader>
+    <CardContent className="space-y-6">
+      {profiles.map((profile, index) => (
+        <div key={index} className="rounded-xl border p-5">
+          <h2 className="text-2xl font-bold">{profile.full_name || "Unknown"}</h2>
+          <p className="mt-1 text-muted-foreground">{profile.headline || "-"}</p>
+          <p className="mt-1 text-sm text-muted-foreground">{profile.location || "-"}</p>
+
+          <div className="mt-4">
+            <h3 className="font-semibold">About</h3>
+            <p className="mt-1 whitespace-pre-line text-sm">{profile.about || "-"}</p>
+          </div>
+
+          <div className="mt-4">
+            <h3 className="font-semibold">Current Employment</h3>
+            <p className="text-sm">
+              {profile.current_employment?.title || "-"} at {profile.current_employment?.company || "-"}
+            </p>
+            <p className="text-sm text-muted-foreground">{profile.current_employment?.duration || "-"}</p>
+            <p className="text-sm text-muted-foreground">{profile.current_employment?.location || "-"}</p>
+          </div>
+
+          <div className="mt-4">
+            <h3 className="font-semibold">Experience</h3>
+            <div className="mt-2 space-y-3">
+              {profile.experience?.length ? (
+                profile.experience.map((exp: any, i: number) => (
+                  <div key={i} className="border-l pl-4">
+                    <p className="font-medium">{exp.role || "-"}</p>
+                    <p className="text-sm">{exp.company || "-"}</p>
+                    <p className="text-sm text-muted-foreground">{exp.duration || "-"}</p>
+                    <p className="text-sm text-muted-foreground">{exp.location || "-"}</p>
+                    <p className="mt-1 whitespace-pre-line text-sm">{exp.description || "-"}</p>
+                  </div>
+                ))
+              ) : (
+                <p className="text-sm text-muted-foreground">-</p>
+              )}
+            </div>
+          </div>
+
+          <div className="mt-4">
+            <h3 className="font-semibold">Education</h3>
+            <div className="mt-2 space-y-2">
+              {profile.education?.length ? (
+                profile.education.map((edu: any, i: number) => (
+                  <div key={i}>
+                    <p className="font-medium">{edu.school || "-"}</p>
+                    <p className="text-sm">{edu.degree || "-"}</p>
+                    <p className="text-sm text-muted-foreground">{edu.field_of_study || "-"}</p>
+                  </div>
+                ))
+              ) : (
+                <p className="text-sm text-muted-foreground">-</p>
+              )}
+            </div>
+          </div>
+
+          <div className="mt-4">
+            <h3 className="font-semibold">Skills</h3>
+            <div className="mt-2 flex flex-wrap gap-2">
+              {profile.skills?.length ? (
+                profile.skills.map((skill: string, i: number) => (
+                  <Badge key={i} variant="secondary">{skill}</Badge>
+                ))
+              ) : (
+                <p className="text-sm text-muted-foreground">-</p>
+              )}
+            </div>
+          </div>
+        </div>
+      ))}
+    </CardContent>
+  </Card>
+)}
     </motion.div>
   );
 }

@@ -11,7 +11,9 @@ import type {
 } from "@/types";
 
 const defaultSettings: Settings = {
-  backendApiUrl: process.env.NEXT_PUBLIC_BACKEND_API_URL || "http://localhost:8000",
+  backendApiUrl: process.env.NEXT_PUBLIC_BACKEND_API_URL || "",
+  apiProvider: "gemini",
+  apiKey: "",
   maxParallelWorkers: 3,
   headless: true,
   retryCount: 2,

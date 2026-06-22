@@ -4,3 +4,12 @@ google-genai
 openai
 python-dotenv
 requests[socks]
+fastapi
+uvicorn[standard]
+python-multipart
+playwright
+pydantic
+google-genai
+openai
+python-dotenv
+requests[socks]

@@ -43,7 +43,7 @@ export default function ProxiesPage() {
   }
 
   async function assign(proxy: ProxyItem, sessionId: string) {
-    const nextProxy = await api.assignProxy(proxy.id, sessionId);
+    const nextProxy = await api.assignProxy(proxy.url, sessionId);
     setProxies((current) => current.map((item) => (item.id === proxy.id ? nextProxy : item)));
     toast({ kind: "success", title: "Proxy assigned", description: `${proxy.url} assigned to ${sessionId}.` });
   }
