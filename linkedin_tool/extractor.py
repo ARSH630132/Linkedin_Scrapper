@@ -184,17 +184,20 @@ class GeminiProvider(LLMProvider):
             print("Both GOOGLE_API_KEY and GEMINI_API_KEY are set. Using GOOGLE_API_KEY.")
         elif gemini_api_key and not google_api_key:
             print("Using GEMINI_API_KEY.")
-
+        print("Creating Gemini client...")
         client = genai.Client(api_key=api_key)
         combined_prompt = f"{system_prompt}\n\n{prompt}"
 
         for attempt in range(3):
             try:
+                print("Sending request to Gemini...")
                 response = client.models.generate_content(
+                    
                     model=GEMINI_MODEL,
                     contents=combined_prompt,
                     config={"response_mime_type": "application/json"},
                 )
+                print("Response received from Gemini...")
                 text = getattr(response, "text", None)
                 if text and text.strip():
                     return text.strip()

@@ -46,8 +46,9 @@ export function getSettings() {
 }
 
 export function saveSettings(settings: Settings) {
-  writeJson(settingsFile, settings);
-  return settings;
+  const nextSettings = { ...defaultSettings, ...settings };
+  writeJson(settingsFile, nextSettings);
+  return nextSettings;
 }
 
 export function getJobs() {

@@ -116,6 +116,15 @@ export interface Settings {
   delayMaxSeconds: number;
 }
 
+export interface ApiKeyStatus {
+  provider: "gemini" | "openrouter" | string;
+  configured: boolean;
+  maskedKey: string;
+  limitAvailable: boolean;
+  limitMessage: string;
+  lastApiError?: string;
+}
+
 export interface StartScrapePayload {
   uploadId?: string;
   profileUrls?: string[];

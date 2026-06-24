@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Papa from "papaparse";
 import { motion } from "framer-motion";
 import { FileCheck2, FileUp, Play, TriangleAlert } from "lucide-react";
@@ -22,7 +22,13 @@ export default function UploadPage() {
   const [loading, setLoading] = useState(false);
   const [profiles, setProfiles] = useState<any[]>([]);
   const { toast } = useToast();
+  useEffect(() => {
+    const savedRows = localStorage.getItem("csvRows");
 
+    if (savedRows) {
+    setRows(JSON.parse(savedRows));
+  }
+}, []);
   const validCount = useMemo(() => rows.filter((row) => row.valid).length, [rows]);
   const invalidRows = useMemo(() => rows.filter((row) => !row.valid), [rows]);
   const hasProfileColumn = rows.length > 0 || !file ? true : false;
@@ -51,13 +57,16 @@ export default function UploadPage() {
           };
         });
         setRows(preview);
+        localStorage.setItem("csvRows", JSON.stringify(preview));
         toast({ kind: "success", title: "CSV parsed", description: `${preview.length} rows loaded for validation.` });
       },
       error: (error) => toast({ kind: "error", title: "Could not parse CSV", description: error.message })
     });
   }
 
-  async function startScraping() {
+async function startScraping() {
+  console.log("START SCRAPING FUNCTION RUNNING");
+
   if (!file || validCount === 0) return;
 
   setLoading(true);
@@ -66,20 +75,27 @@ export default function UploadPage() {
   try {
     const formData = new FormData();
     formData.append("file", file);
-
+    console.log("API URL:", process.env.NEXT_PUBLIC_API_URL);
+    console.log("CALLING:", `${process.env.NEXT_PUBLIC_API_URL}/api/scrape/csv`);
+    console.log("FILE:", file);
     const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/scrape/csv`, {
       method: "POST",
       body: formData,
     });
 
     const result = await res.json();
+    console.log("STATUS:", res.status);
+console.log("RESULT:", result);
 
     if (!res.ok) {
       throw new Error(result.detail || "Backend request failed.");
     }
 
     setProfiles(result.data?.profiles || []);
-
+localStorage.setItem(
+  "latestScrapedProfiles",
+  JSON.stringify(result.data?.profiles || [])
+);
     toast({
       kind: "success",
       title: "Scraping completed",
@@ -137,10 +153,18 @@ export default function UploadPage() {
               </div>
             </div>
 
-            <Button className="mt-5 w-full" disabled={!hasProfileColumn || validCount === 0 || loading} onClick={startScraping}>
-              <Play className="h-4 w-4" />
-              {loading ? "Scraping..." : "Start Scraping"}
-            </Button>
+            <Button
+  className="mt-5 w-full"
+  disabled={!hasProfileColumn || validCount === 0 || loading}
+  onClick={() => {
+    alert("BUTTON CLICKED");
+    console.log("BUTTON CLICKED");
+    startScraping();
+  }}
+>
+  <Play className="h-4 w-4" />
+  {loading ? "Scraping..." : "Start Scraping"}
+</Button>
           </CardContent>
         </Card>
 

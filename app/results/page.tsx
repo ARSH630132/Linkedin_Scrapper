@@ -3,7 +3,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import { BriefcaseBusiness, Download, GraduationCap, Search, Sparkles, UserRound } from "lucide-react";
-import { api } from "@/lib/api";
 import type { ProfileResult } from "@/types";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -31,9 +30,40 @@ export default function ResultsPage() {
   const { toast } = useToast();
 
   useEffect(() => {
-    api.getResults("all").then(setResults);
-  }, []);
+  const saved = localStorage.getItem("latestScrapedProfiles");
 
+  if (!saved) {
+    setResults([]);
+    return;
+  }
+
+  const parsed = JSON.parse(saved);
+
+  const mapped = parsed.map((profile: any, index: number) => ({
+    id: `profile_${index + 1}`,
+    jobId: "latest",
+    profileUrl: profile.profile_url || "",
+    full_name: profile.full_name || "",
+    headline: profile.headline || "",
+    location: profile.location || "",
+    about: profile.about || "",
+    current_employment: profile.current_employment || {
+      title: "",
+      company: "",
+      duration: "",
+      location: "",
+    },
+    experience: profile.experience || [],
+    education: profile.education || [],
+    skills: profile.skills || [],
+    email: profile.email || "",
+    status: profile.full_name ? "completed" : "failed",
+    sourceFile: profile.sourceFile || "",
+    error: profile.error || "",
+  }));
+
+  setResults(mapped);
+}, []);
   const filtered = useMemo(() => {
     const needle = query.toLowerCase();
     return results.filter((profile) =>

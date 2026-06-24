@@ -1,5 +1,6 @@
 import type {
   BrowserSession,
+  ApiKeyStatus,
   DashboardMetrics,
   ProfileResult,
   ProxyItem,
@@ -11,7 +12,7 @@ import type {
 } from "@/types";
 
 const defaultSettings: Settings = {
-  backendApiUrl: process.env.NEXT_PUBLIC_BACKEND_API_URL || "",
+  backendApiUrl: process.env.NEXT_PUBLIC_API_URL || process.env.NEXT_PUBLIC_BACKEND_API_URL || "",
   apiProvider: "gemini",
   apiKey: "",
   maxParallelWorkers: 3,
@@ -20,6 +21,40 @@ const defaultSettings: Settings = {
   delayMinSeconds: 4,
   delayMaxSeconds: 12
 };
+
+const settingsStorageKey = "scraperSettings";
+const backendApiUrlStorageKey = "backendApiUrl";
+
+function readLocalSettings(): Settings {
+  if (typeof window === "undefined") return defaultSettings;
+
+  try {
+    const saved = window.localStorage.getItem(settingsStorageKey) ?? window.sessionStorage.getItem(settingsStorageKey);
+    if (saved) return { ...defaultSettings, ...(JSON.parse(saved) as Partial<Settings>) };
+
+    const savedBackendUrl = window.localStorage.getItem(backendApiUrlStorageKey) ?? window.sessionStorage.getItem(backendApiUrlStorageKey);
+    return savedBackendUrl ? { ...defaultSettings, backendApiUrl: savedBackendUrl } : defaultSettings;
+  } catch {
+    return defaultSettings;
+  }
+}
+
+function saveLocalSettings(settings: Settings) {
+  if (typeof window === "undefined") return;
+  const serializedSettings = JSON.stringify(settings);
+  try {
+    window.localStorage.setItem(settingsStorageKey, serializedSettings);
+    window.localStorage.setItem(backendApiUrlStorageKey, settings.backendApiUrl);
+  } catch {
+    // Ignore unavailable local storage and still try session storage.
+  }
+  try {
+    window.sessionStorage.setItem(settingsStorageKey, serializedSettings);
+    window.sessionStorage.setItem(backendApiUrlStorageKey, settings.backendApiUrl);
+  } catch {
+    // Ignore unavailable session storage.
+  }
+}
 
 const now = new Date();
 const iso = (minutesAgo: number) => new Date(now.getTime() - minutesAgo * 60_000).toISOString();
@@ -122,7 +157,7 @@ const mockResults: ProfileResult[] = [
 
 function getBackendUrl() {
   if (typeof window !== "undefined") {
-    const saved = window.localStorage.getItem("backendApiUrl");
+    const saved = readLocalSettings().backendApiUrl;
     if (saved) return saved.replace(/\/$/, "");
   }
   return defaultSettings.backendApiUrl.replace(/\/$/, "");
@@ -161,31 +196,20 @@ export const api = {
   uploadCsv: async (file: File): Promise<UploadCsvResponse> => {
     const form = new FormData();
     form.append("file", file);
-    return request("/api/scraper/upload-csv", { method: "POST", body: form }, {
-      uploadId: "upload_mock",
-      filename: file.name,
-      rows: [],
-      validCount: 0,
-      invalidCount: 0
-    });
+    return request<UploadCsvResponse>("/api/scraper/upload-csv", { method: "POST", body: form });
   },
 
   startScraping: (payload: StartScrapePayload) =>
-    request<ScrapeJob>("/api/scraper/start", { method: "POST", body: JSON.stringify(payload) }, { ...mockJobs[0], status: "running" }),
+    request<ScrapeJob>("/api/scraper/start", { method: "POST", body: JSON.stringify(payload) }),
   pauseScraping: (jobId: string) =>
-    request<ScrapeJob>("/api/scraper/pause", { method: "POST", body: JSON.stringify({ jobId }) }, { ...mockJobs[0], id: jobId, status: "paused" }),
+    request<ScrapeJob>("/api/scraper/pause", { method: "POST", body: JSON.stringify({ jobId }) }),
   retryScraping: (jobId: string) =>
-    request<ScrapeJob>("/api/scraper/retry", { method: "POST", body: JSON.stringify({ jobId }) }, { ...mockJobs[0], id: jobId, status: "running" }),
-  getJobs: () => request<ScrapeJob[]>("/api/scraper/jobs", undefined, mockJobs),
-  getJob: (id: string) => request<ScrapeJob>(`/api/scraper/jobs/${id}`, undefined, mockJobs.find((job) => job.id === id) ?? mockJobs[0]),
+    request<ScrapeJob>("/api/scraper/retry", { method: "POST", body: JSON.stringify({ jobId }) }),
+  getJobs: () => request<ScrapeJob[]>("/api/scraper/jobs", undefined, []),
+  getJob: (id: string) => request<ScrapeJob>(`/api/scraper/jobs/${id}`),
   getLogs: (jobId: string) =>
-    request<ScrapeLog[]>(`/api/scraper/logs/${jobId}`, undefined, [
-      { id: "log_1", jobId, level: "info", message: "Loaded CSV and assigned profiles across sessions.", timestamp: iso(18) },
-      { id: "log_2", jobId, level: "success", message: "primary saved data/sarthak-kashyapp.json", timestamp: iso(10) },
-      { id: "log_3", jobId, level: "warning", message: "secondary proxy timed out; selecting replacement.", timestamp: iso(6) },
-      { id: "log_4", jobId, level: "info", message: "Gemini extraction returned valid JSON.", timestamp: iso(2) }
-    ]),
-  getResults: (jobId: string) => request<ProfileResult[]>(`/api/scraper/results/${jobId}`, undefined, mockResults.filter((result) => result.jobId === jobId || jobId === "all")),
+    request<ScrapeLog[]>(`/api/scraper/logs/${jobId}`, undefined, []),
+  getResults: (jobId: string) => request<ProfileResult[]>(`/api/scraper/results/${jobId}`, undefined, []),
 
   createSession: (name: string) =>
     request<BrowserSession>("/api/sessions/create", { method: "POST", body: JSON.stringify({ name }) }, {
@@ -218,9 +242,29 @@ export const api = {
       assignedSession: sessionId
     }),
 
-  getSettings: () => request<Settings>("/api/settings", undefined, defaultSettings),
-  saveSettings: (settings: Settings) => {
-    if (typeof window !== "undefined") window.localStorage.setItem("backendApiUrl", settings.backendApiUrl);
-    return request<Settings>("/api/settings", { method: "POST", body: JSON.stringify(settings) }, settings);
-  }
+  getSettings: async () => {
+    const localSettings = readLocalSettings();
+    const hasSavedLocalSettings = typeof window !== "undefined" && (
+      window.localStorage.getItem(settingsStorageKey) !== null ||
+      window.sessionStorage.getItem(settingsStorageKey) !== null
+    );
+    const settings = await request<Settings>("/api/settings", undefined, localSettings);
+    const mergedSettings = hasSavedLocalSettings ? { ...settings, ...localSettings } : { ...localSettings, ...settings };
+    saveLocalSettings(mergedSettings);
+    return mergedSettings;
+  },
+  saveSettings: async (settings: Settings) => {
+    saveLocalSettings(settings);
+    const saved = await request<Settings>("/api/settings", { method: "POST", body: JSON.stringify(settings) }, settings);
+    const mergedSettings = { ...saved, ...settings };
+    saveLocalSettings(mergedSettings);
+    return mergedSettings;
+  },
+  getApiKeyStatus: () => request<ApiKeyStatus>("/api/settings/api-key-status", undefined, {
+    provider: "gemini",
+    configured: false,
+    maskedKey: "",
+    limitAvailable: false,
+    limitMessage: "Backend is not reachable, so API key limits could not be checked."
+  })
 };
